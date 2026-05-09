@@ -64,17 +64,24 @@ jobs:
 
       - name: Build, tag and push Docker image
         id: build-image
+        env:
+          FULL_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
         run: |
-          IMAGE_TAG=${{ github.sha }}
-          FULL_IMAGE=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "Building image: $FULL_IMAGE"
 
           docker build -t $FULL_IMAGE .
           docker push $FULL_IMAGE
 
-          docker tag $FULL_IMAGE $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker tag $FULL_IMAGE ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
 
+          # Write to GITHUB_OUTPUT so deploy job can read it
           echo "image=$FULL_IMAGE" >> $GITHUB_OUTPUT
+
+          # Verify it was written
+          echo "--- GITHUB_OUTPUT contents ---"
+          cat $GITHUB_OUTPUT
+
 
   # ─────────────────────────────────────────────────────
   # JOB 3: DEPLOY TO EKS
@@ -106,10 +113,18 @@ jobs:
           IMAGE="${{ needs.dockerize.outputs.image }}"
           BUILD="${{ github.sha }}"
 
+          echo "IMAGE value is: $IMAGE"
+
+          # Fail early if IMAGE is still empty
+          if [ -z "$IMAGE" ]; then
+            echo "ERROR: IMAGE is empty - output from dockerize job not received"
+            exit 1
+          fi
+
           sed -i "s|IMAGE_PLACEHOLDER|${IMAGE}|g" k8s/deployment.yaml
           sed -i "s|BUILDVER_PLACEHOLDER|${BUILD}|g" k8s/deployment.yaml
 
-          echo "--- Verifying image line in deployment.yaml ---"
+          echo "--- Verifying image line ---"
           grep "image:" k8s/deployment.yaml
 
           kubectl apply -f k8s/deployment.yaml
