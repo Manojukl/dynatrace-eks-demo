@@ -1,0 +1,24 @@
+# k8s/service.yaml
+apiVersion: v1
+kind: Service
+ 
+metadata:
+  name: dynatrace-eks-app-service
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    # These annotations tell AWS to create an internet-facing Load Balancer
+ 
+spec:
+  type: LoadBalancer
+  # LoadBalancer = AWS creates an ALB and gives you a public URL
+ 
+  selector:
+    app: dynatrace-eks-app
+  # This must match the labels in deployment.yaml
+ 
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+  # External traffic on port 80 is forwarded to port 3000 in the container

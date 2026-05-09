@@ -1,0 +1,24 @@
+# cluster.yaml — EKS Cluster Definition
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+ 
+metadata:
+  name: dynatrace-eks-cluster
+  region: ap-south-1
+  version: "1.31"
+ 
+# Node group = the EC2 machines that run your containers
+managedNodeGroups:
+  - name: ng-demo
+    instanceType: t3.medium
+    # t3.medium = 2 vCPUs, 4GB RAM — enough for this demo
+    desiredCapacity: 2
+    minSize: 1
+    maxSize: 3
+    # Auto-scaling: minimum 1 node, maximum 3, target 2
+    privateNetworking: true
+    # Nodes in private subnet — more secure
+    iam:
+      withAddonPolicies:
+        cloudWatch: true
+        # Allows nodes to send logs to CloudWatch

@@ -1,0 +1,160 @@
+# .github/workflows/deploy.yml
+name: CI/CD — Build, Push to ECR, Deploy to EKS, Notify Dynatrace
+ 
+# This pipeline triggers whenever code is pushed to the main branch
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+  # workflow_dispatch lets you also trigger it manually from GitHub UI
+ 
+# Environment variables shared across all jobs
+env:
+  AWS_REGION:       ${{ secrets.AWS_REGION }}
+  ECR_REGISTRY:     ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+  ECR_REPOSITORY:   ${{ secrets.ECR_REPOSITORY }}
+  EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+jobs:
+ 
+  # ─────────────────────────────────────────────────────
+  # JOB 1: BUILD AND TEST
+  # ─────────────────────────────────────────────────────
+  build:
+    name: Build and Test Application
+    runs-on: ubuntu-latest
+    # runs-on: the type of machine GitHub gives you to run this job
+ 
+    steps:
+      - name: Checkout code from repository
+        uses: actions/checkout@v3
+        # This downloads your repo code onto the runner machine
+ 
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+ 
+      - name: Install dependencies
+        run: npm install
+ 
+      - name: Run tests
+        run: npm test
+        # Our test just echoes success — in real projects this runs Jest etc
+  # ─────────────────────────────────────────────────────
+  # JOB 2: BUILD DOCKER IMAGE AND PUSH TO ECR
+  # ─────────────────────────────────────────────────────
+  dockerize:
+    name: Build Docker Image and Push to ECR
+    runs-on: ubuntu-latest
+    needs: build
+    # needs: this job only runs after 'build' job passes
+ 
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+      # This passes the final image URI to the next job
+ 
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+ 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+ 
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+        # This runs: aws ecr get-login-password | docker login ...
+ 
+      - name: Build, tag and push Docker image
+        id: build-image
+        run: |
+          # Use the git commit SHA as the image tag
+          # This ensures every deployment has a unique, traceable image
+          IMAGE_TAG=${{ github.sha }}
+          FULL_IMAGE=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+ 
+          docker build -t $FULL_IMAGE .
+          docker push $FULL_IMAGE
+ 
+          # Also tag it as 'latest'
+          docker tag $FULL_IMAGE $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+ 
+          # Pass the image URI to the next job
+          echo "image=$FULL_IMAGE" >> $GITHUB_OUTPUT
+  # ─────────────────────────────────────────────────────
+  # JOB 3: DEPLOY TO EKS
+  # ─────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: dockerize
+ 
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+ 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+ 
+      - name: Update kubeconfig to connect to EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ secrets.EKS_CLUSTER_NAME }} \
+            --region ${{ env.AWS_REGION }}
+          # This writes connection details to ~/.kube/config on the runner
+          # so kubectl commands know which cluster to talk to
+ 
+      - name: Replace image placeholder in deployment.yaml
+        run: |
+          # Replace IMAGE_PLACEHOLDER with the real ECR image URI
+          sed -i 's|IMAGE_PLACEHOLDER|${{ needs.dockerize.outputs.image }}|g' k8s/deployment.yaml
+          # Also update the build version
+          sed -i 's|BUILDVER_PLACEHOLDER|${{ github.sha }}|g' k8s/deployment.yaml
+ 
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          # apply = create if not exists, update if already exists
+ 
+      - name: Wait for deployment to complete
+        run: |
+          kubectl rollout status deployment/dynatrace-eks-app --timeout=120s
+          # This waits until all pods are Running before continuing
+ 
+  # ─────────────────────────────────────────────────────
+  # JOB 4: NOTIFY DYNATRACE
+  # ─────────────────────────────────────────────────────
+  notify-dynatrace:
+    name: Send Deployment Event to Dynatrace
+    runs-on: ubuntu-latest
+    needs: deploy
+ 
+    steps:
+      - name: Send CUSTOM_DEPLOYMENT event
+        run: |
+          curl -X POST "${{ secrets.DT_API_URL }}/api/v2/events/ingest" \
+            -H "Authorization: Api-Token ${{ secrets.DT_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "eventType": "CUSTOM_DEPLOYMENT",
+              "title": "GitHub Actions Deployment to EKS",
+              "entitySelector": "type(SERVICE),tag(dynatrace-eks-demo)",
+              "properties": {
+                "deployment.version": "${{ github.sha }}",
+                "deployment.project": "dynatrace-eks-demo",
+                "deployment.release.stage": "production",
+                "git.branch": "${{ github.ref_name }}",
+                "triggered.by": "GitHub Actions"
+              }
+            }'
+

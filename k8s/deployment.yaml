@@ -1,0 +1,62 @@
+# k8s/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+ 
+metadata:
+  name: dynatrace-eks-app
+  # This is the name of your deployment in Kubernetes
+  labels:
+    app: dynatrace-eks-app
+ 
+spec:
+  replicas: 2
+  # Run 2 copies of the container for reliability
+ 
+  selector:
+    matchLabels:
+      app: dynatrace-eks-app
+  # Kubernetes uses this label to know which pods belong to this deployment
+ 
+  template:
+    metadata:
+      labels:
+        app: dynatrace-eks-app
+        # Dynatrace will use this label to identify the app
+    spec:
+      containers:
+        - name: app
+          image: IMAGE_PLACEHOLDER
+          # GitHub Actions will replace IMAGE_PLACEHOLDER with the real ECR image URI
+ 
+          ports:
+            - containerPort: 3000
+ 
+          env:
+            - name: BUILD_VERSION
+              value: "BUILDVER_PLACEHOLDER"
+            # GitHub Actions replaces this too
+ 
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          # requests = minimum guaranteed. limits = maximum allowed
+ 
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # Kubernetes checks if your app is ready before sending traffic
+ 
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          # Kubernetes restarts the container if this check fails

@@ -1,0 +1,13 @@
+{
+  "name": "dynatrace-eks-demo",
+  "version": "1.0.0",
+  "description": "Simple Node.js app for Dynatrace EKS CI/CD demo",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "test": "echo All tests passed && exit 0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
