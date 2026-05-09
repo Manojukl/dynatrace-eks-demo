@@ -1,92 +1,4 @@
-# .github/workflows/deploy.yml
-name: CI/CD — Build, Push to ECR, Deploy to EKS, Notify Dynatrace
-
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
-
-env:
-  AWS_REGION:       ${{ secrets.AWS_REGION }}
-  ECR_REGISTRY:     ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-  ECR_REPOSITORY:   ${{ secrets.ECR_REPOSITORY }}
-  EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
-
-jobs:
-
-  # ─────────────────────────────────────────────────────
-  # JOB 1: BUILD AND TEST
-  # ─────────────────────────────────────────────────────
-  build:
-    name: Build and Test Application
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Node.js 18
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Run tests
-        run: npm test
-
-  # ─────────────────────────────────────────────────────
-  # JOB 2: BUILD DOCKER IMAGE AND PUSH TO ECR
-  # ─────────────────────────────────────────────────────
-  dockerize:
-    name: Build Docker Image and Push to ECR
-    runs-on: ubuntu-latest
-    needs: build
-
-    outputs:
-      image: ${{ steps.build-image.outputs.image }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Log in to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
-
-      - name: Build, tag and push Docker image
-        id: build-image
-        env:
-          FULL_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-        run: |
-          echo "Building image: $FULL_IMAGE"
-
-          docker build -t $FULL_IMAGE .
-          docker push $FULL_IMAGE
-
-          docker tag $FULL_IMAGE ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
-          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
-
-          # Write to GITHUB_OUTPUT so deploy job can read it
-          echo "image=$FULL_IMAGE" >> $GITHUB_OUTPUT
-
-          # Verify it was written
-          echo "--- GITHUB_OUTPUT contents ---"
-          cat $GITHUB_OUTPUT
-
-
-  # ─────────────────────────────────────────────────────
-  # JOB 3: DEPLOY TO EKS
-  # ─────────────────────────────────────────────────────
-  deploy:
+deploy:
     name: Deploy to EKS
     runs-on: ubuntu-latest
     needs: dockerize
@@ -110,16 +22,11 @@ jobs:
 
       - name: Replace placeholders and deploy
         run: |
-          IMAGE="${{ needs.dockerize.outputs.image }}"
+          # Rebuild the image URI directly — same formula as dockerize job
+          IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
           BUILD="${{ github.sha }}"
 
           echo "IMAGE value is: $IMAGE"
-
-          # Fail early if IMAGE is still empty
-          if [ -z "$IMAGE" ]; then
-            echo "ERROR: IMAGE is empty - output from dockerize job not received"
-            exit 1
-          fi
 
           sed -i "s|IMAGE_PLACEHOLDER|${IMAGE}|g" k8s/deployment.yaml
           sed -i "s|BUILDVER_PLACEHOLDER|${BUILD}|g" k8s/deployment.yaml
@@ -133,30 +40,3 @@ jobs:
       - name: Wait for deployment to complete
         run: |
           kubectl rollout status deployment/dynatrace-eks-app --timeout=120s
-
-  # ─────────────────────────────────────────────────────
-  # JOB 4: NOTIFY DYNATRACE
-  # ─────────────────────────────────────────────────────
-  notify-dynatrace:
-    name: Send Deployment Event to Dynatrace
-    runs-on: ubuntu-latest
-    needs: deploy
-
-    steps:
-      - name: Send CUSTOM_DEPLOYMENT event
-        run: |
-          curl -X POST "${{ secrets.DT_API_URL }}/api/v2/events/ingest" \
-            -H "Authorization: Api-Token ${{ secrets.DT_API_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "eventType": "CUSTOM_DEPLOYMENT",
-              "title": "GitHub Actions Deployment to EKS",
-              "entitySelector": "type(SERVICE),tag(dynatrace-eks-demo)",
-              "properties": {
-                "deployment.version": "${{ github.sha }}",
-                "deployment.project": "dynatrace-eks-demo",
-                "deployment.release.stage": "production",
-                "git.branch": "${{ github.ref_name }}",
-                "triggered.by": "GitHub Actions"
-              }
-            }'
